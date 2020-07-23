@@ -1,0 +1,61 @@
+import cv2
+import cvlib as cv
+from cvlib.object_detection import draw_bbox
+import base64
+import grpc
+import pravega.grpc_gateway as pravega
+import os
+ 
+def handler(context, event):
+  
+        
+    gateway = os.environ["DOCKER_HOST"]+':54672'
+    pravega_channel = grpc.insecure_channel(gateway, options=[
+        ('grpc.max_receive_message_length', 9*1024*1024),
+    ])
+    pravega_client = pravega.grpc.PravegaGatewayStub(pravega_channel)
+    fh = open("testImage.png","wb")
+    fh.write(base64.b64decode(event.body["streamEventData"]))
+    fh.close()
+ 
+    #open image file
+    im = cv2.imread('testImage.png')
+    bbox, label, conf = cv.detect_common_objects(im,confidence=0.1, model='yolov3-tiny')
+    output_image = draw_bbox(im, bbox, label, conf)
+    #save output image
+    cv2.imwrite("testImageRESULT.png",output_image)
+ 
+    #get result meant for sending back to pravega
+    fh = open("testImageRESULT.png","rb")
+    resultstr = fh.read()
+    resultstr = base64.b64encode(resultstr)
+      
+      # create Scope 
+    request = pravega.pb.CreateScopeRequest(scope='resultScope') 
+    print ("create scope request " + str(request)) 
+    response = pravega_client.CreateScope(request) 
+    print ("create scope reponse" + str(response)) 
+    
+    # create Stream 
+    request = pravega.pb.CreateStreamRequest( 
+    scope='resultScope', 
+    stream='resultStream', 
+    scaling_policy=pravega.pb.ScalingPolicy(min_num_segments=1) 
+        ) 
+    response = pravega_client.CreateStream(request) 
+ 
+     #write events to a stream
+    events_to_write = [pravega.pb.WriteEventsRequest(
+        scope='resultScope',
+        stream='resultStream',
+        event=("message from pravega-grpc-gateway" + str(i)).encode('UTF-8'),
+        routing_key="customRoutingKey"
+    ) for i in range(1)]
+    write_response = pravega_client.WriteEvents(iter(events_to_write))
+    
+    # return{"body":resultstr, "bbox":bbox,"labels":label,"confs":conf}
+
+    return context.Response(body= resultstr,
+                            headers={},
+                            content_type='text/plain',
+                            status_code=200)
